@@ -1,0 +1,248 @@
+原文地址：https://ask.hellobi.com/blog/ambition119/36707
+
+一. 开发环境搭建
+
+     因为是学习，所以选择docker的方式，操作命令如下：
+
+docker pull dgraph/standalone
+docker run --rm -it -p 8080:8080 -p 9080:9080 -p 8000:8000 -v ~/dgraph:/dgraph dgraph/standalone:latest
+     url地址访问：http://localhost:8000/?latest
+
+image.png
+
+
+
+二. 代码开发
+
+     主要使用java和go语言开发的方式
+
+1. 搭建java开发环境
+
+<dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <version>1.18.12</version>
+        </dependency>
+        <dependency>
+            <groupId>com.google.code.gson</groupId>
+            <artifactId>gson</artifactId>
+            <version>2.8.5</version>
+        </dependency>
+        <dependency>
+            <groupId>io.dgraph</groupId>
+            <artifactId>dgraph4j</artifactId>
+            <version>20.03.0</version>
+        </dependency>
+操作文档：https://github.com/dgraph-io/dgraph4j
+
+2. 编写java代码
+
+2.1 第一个demo
+
+
+import com.am.Dgraph.bean.People;
+import com.am.Dgraph.bean.Person;
+import com.google.gson.Gson;
+import com.google.protobuf.ByteString;
+import io.dgraph.DgraphClient;
+import io.dgraph.DgraphGrpc;
+import io.dgraph.DgraphProto.Mutation;
+import io.dgraph.DgraphProto.Operation;
+import io.dgraph.DgraphProto.Response;
+import io.dgraph.Transaction;
+import io.grpc.ManagedChannel;
+import io.grpc.ManagedChannelBuilder;
+
+import java.util.Collections;
+import java.util.Map;
+
+public class OptDgraph{
+    public static void main(String[] args) {
+        opDgraph();
+    }
+
+
+
+    public static void opDgraph() {
+        final DgraphClient dgraphClient = getDgraphClient();
+        //删除schema + 数据
+        dgraphClient.alter(Operation.newBuilder().setDropAll(true).build());
+
+        String schema = "name: string @index(exact) .";
+        Operation operation = Operation.newBuilder().setSchema(schema).build();
+        dgraphClient.alter(operation);
+
+        Gson gson = new Gson(); // For JSON encode/decode
+        Transaction txn = dgraphClient.newTransaction();
+
+        // Create data
+        Person p = new Person();
+        p.setName("Alice");
+
+        // Serialize
+        String json = gson.toJson(p);
+
+        try {
+            Mutation mutation = Mutation.newBuilder().setSetJson(ByteString.copyFromUtf8(json)).build();
+
+            txn.mutate(mutation);
+            txn.commit();
+        } finally {
+            txn.discard();
+        }
+
+        // Query
+        String query =
+                "query all($a: string){\n" + "all(func: eq(name, $a)) {\n" + "    name\n" + "  }\n" + "}";
+        System.out.println(query);
+        Map<String, String> vars = Collections.singletonMap("$a", "Alice");
+        Response res = dgraphClient.newTransaction().queryWithVars(query, vars);
+
+        // {"all":[{"name":"Alice"}]}, 这里的all主要是all(func: eq(name, $a) 的all控制，是个数组格式
+        System.out.println(res.getJson().toStringUtf8());
+
+        // Deserialize
+//        //不符合Person的构造，所以返回Person(name=null)有问题
+//        final Person person = gson.fromJson(res.getJson().toStringUtf8(), Person.class);
+//        System.out.println(person);
+
+        // Deserialize
+        People ppl = gson.fromJson(res.getJson().toStringUtf8(), People.class);
+//
+//        // Print results
+        System.out.printf("people found: %d\n", ppl.getAll().size());
+        ppl.getAll().forEach(person -> System.out.println(person.getName()));
+    }
+
+
+    public static DgraphClient getDgraphClient() {
+        ManagedChannel channel =
+                ManagedChannelBuilder.forAddress("localhost",9080).usePlaintext().build();
+
+        DgraphGrpc.DgraphStub stub = DgraphGrpc.newStub(channel);
+
+        DgraphClient dgraphClient = new DgraphClient(stub);
+        return  dgraphClient;
+    }
+
+}
+输出展示：
+
+query all($a: string){
+all(func: eq(name, $a)) {
+    name
+  }
+}
+{"all":[{"name":"Alice"}]}
+people found: 1
+Alice
+image.png
+
+
+
+3. go语言开发
+
+3.1 环境
+
+go get -u github.com/dgraph-io/dgo/v2
+下载依赖模块，成功后产生go.mod
+
+image.png
+
+3.2 demo开发
+
+import (
+	"context"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"log"
+
+	"github.com/dgraph-io/dgo/v2"
+	"github.com/dgraph-io/dgo/v2/protos/api"
+	"google.golang.org/grpc"
+)
+
+var (
+	dgraph = flag.String("d", "localhost:9080", "Dgraph Alpha address")
+)
+
+func main() {
+	optDgraph()
+}
+
+
+func optDgraph() {
+	flag.Parse()
+	conn, err := grpc.Dial(*dgraph, grpc.WithInsecure())
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	client := dgo.NewDgraphClient(api.NewDgraphClient(conn))
+	ctx := context.Background()
+	err =  client.Alter(ctx, &api.Operation{DropAll: true})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	schema := "name: string @index(term) . \n" +
+		      "age: int .\n" +
+		     "type Person {\n" +
+					"\tname\n" +
+					"\tage\n" +
+		     "}"
+	err =  client.Alter(ctx, &api.Operation{Schema: schema})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	person := &Person{
+		Name: "Alice",
+		Age: 24,
+	}
+
+	mu := &api.Mutation{CommitNow: true}
+	pb, err := json.Marshal(person)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	mu.SetJson = pb
+	_, err = client.NewTxn().Mutate(ctx, mu)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	queryAll := `{
+				  all(func: has(name)) {
+					uid,
+					name,
+					age
+				  }
+				}`
+
+	res, err :=  client.NewTxn().Query(ctx, queryAll)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(res)
+
+	queryAs := `query eq($name: string){ eq(func: eq(name, $name)) {
+					uid,
+					name,
+					age
+				  } 
+				}`
+	res, err = client.NewTxn().QueryWithVars(ctx, queryAs,  map[string]string{"$name": "Alice"})
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(res)
+}
+
+type Person struct {
+	Uid     string   `json:"uid"`
+	Name    string   `json:"name"`
+	Age     int      `json:"age"`
+}
